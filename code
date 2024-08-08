@@ -1,0 +1,236 @@
+import argparse
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='2v1 Football Shootout MDP')
+    parser.add_argument('p', type=float, help='Skill level for moving actions (0 <= p <= 0.5)')
+    parser.add_argument('q', type=float, help='Skill level for passing/shooting actions (0.6 <= q <= 1)')
+    parser.add_argument('opponent_policy', type=str, help='Opponent policy (greedy, park, random)')
+    return parser.parse_args()
+
+args = parse_arguments()
+p = args.p
+q = args.q
+opponent_policy_type = args.opponent_policy
+
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+
+def greedy_defense(state):
+    _, _, r_pos, ball_possession = state
+    b_pos = state[ball_possession - 1]
+    r_row, r_col = divmod(r_pos - 1, 4)
+    b_row, b_col = divmod(b_pos - 1, 4)
+    if r_row < b_row:
+        return "D"
+    elif r_row > b_row:
+        return "U"
+    elif r_col < b_col:
+        return "R"
+    else:
+        return "L"
+
+def park_the_bus(state):
+    r_pos = state[2]  # Get the position of the defender (R)
+    r_row, r_col = divmod(r_pos - 1, 4)  # Convert position to row and column indices
+
+    # Park the bus by shuffling up and down in front of the goal
+    if r_row in [2, 3]:
+        return "U"  # Move up to stay in the goal area
+    else:
+        return "D"  # Move down to approach the goal area
+
+
+def random_policy(state):
+    return random.choice(["L", "R", "U", "D"])
+
+opponent_policies = {
+    'greedy': greedy_defense,
+    'park': park_the_bus,
+    'random': random_policy
+}
+
+opponent_policy = opponent_policies[opponent_policy_type]
+
+states = [(b1, b2, r, pos) for b1 in range(1, 17) for b2 in range(1, 17) for r in range(1, 17) for pos in [1, 2]]
+actions = ['L_B1', 'R_B1', 'U_B1', 'D_B1', 'L_B2', 'R_B2', 'U_B2', 'D_B2', 'PASS', 'SHOOT']
+
+def get_next_state(state, action, p, q, opponent_policy):
+    b1, b2, r, pos = state
+
+    # Calculate opponent's move
+    opp_move = opponent_policy(state)
+    r_row, r_col = divmod(r - 1, 4)
+    if opp_move == "L" and r_col > 0:
+        r -= 1
+    elif opp_move == "R" and r_col < 3:
+        r += 1
+    elif opp_move == "U" and r_row > 0:
+        r -= 4
+    elif opp_move == "D" and r_row < 3:
+        r += 4
+
+    #calculating strikers move
+    b1_row, b1_col = divmod(b1 - 1, 4)
+    b2_row, b2_col = divmod(b2 - 1, 4)
+
+    if action.startswith('L_') and b1 % 4 != 1 :
+        if pos == 1:
+            b1_col -= 1
+        elif pos==2 and b2 % 4 != 1 :
+            b2_col -= 1
+    elif action.startswith('R_') and b1%4 !=0:
+        if pos == 1:
+            b1_col += 1
+        elif pos==2 and b2%4 !=0 :
+            b2_col += 1
+    elif action.startswith('U_') and b1>4:
+        if pos == 1:
+            b1_row -= 1
+        elif pos==2 and b2>4:
+            b2_row -= 1
+    elif action.startswith('D_') and b1<13 :
+        if pos == 1:
+            b1_row += 1
+        elif pos==2 and b2<13:
+            b2_row += 1
+
+    new_b1_pos = b1_row * 4 + b1_col + 1
+    new_b2_pos = b2_row * 4 + b2_col + 1
+
+    # Determine if possession is lost due to movement
+    if pos == 1:
+        if random.random() < 2 * p:
+            return state, -1  # Possession lost, episode ends
+    else:
+        if random.random() < p:
+            return state, -1  # Episode ends
+
+    # Check if the player with the ball goes out of bounds
+    if new_b1_pos < 1 or new_b1_pos > 16 or new_b2_pos < 1 or new_b2_pos > 16:
+        return state, -1  # Out of bounds, episode ends
+
+    # Determine if a tackle is possible
+    if new_b1_pos == r or new_b2_pos == r:
+        if random.random() < 0.5:
+            return state, -1  # Tackle successful, possession lost
+
+        # Handle passing action
+    if action == 'PASS':
+        b1_pos = new_b1_pos if pos == 1 else new_b2_pos
+        b_other_pos = new_b2_pos if pos == 1 else new_b1_pos
+        b1_row, b1_col = divmod(b1_pos - 1, 4)
+        b_other_row, b_other_col = divmod(b_other_pos - 1, 4)
+        dist = max(abs(b1_row - b_other_row), abs(b1_col - b_other_col))
+        pass_prob = q - 0.1 * dist
+        if r in {b1_pos, b_other_pos}:
+            pass_prob /= 2
+        if random.random() > pass_prob:
+            return state, -1  # Pass fails, episode ends
+
+     # Handle shooting action
+    if action == 'SHOOT':
+        # Calculate the goal probability based on the shooter's position
+        if pos == 1:
+            x1, _ = divmod(new_b1_pos - 1, 4)
+        else:
+            x1, _ = divmod(new_b2_pos - 1, 4)
+
+        goal_probability = q - 0.2 * (3 - x1)
+
+        # Check for opponent in front of the goal
+        r_row, r_col = divmod(r - 1, 4)
+        if pos==1:
+          if new_b1_pos in [8, 12]:
+            # Determine squares directly in front of the goal
+            in_front_of_goal = {
+                8: [4, 7],
+                12: [8, 11]
+            }
+            front_squares = in_front_of_goal.get(new_b1_pos, [])
+            if r in front_squares:
+                shoot_prob /= 2
+          else:
+            if new_b2_pos in [8, 12]:
+            # Determine squares directly in front of the goal
+            in_front_of_goal = {
+                8: [4, 7],
+                12: [8, 11]
+            }
+            front_squares = in_front_of_goal.get(new_b2_pos, [])
+            if r in front_squares:
+                shoot_prob /= 2
+        if random.random() > goal_probability:
+            return state, -1  # Shot fails, episode ends
+
+        return state, 1  # Reward for scoring a goal
+
+    new_state = (new_b1_pos, new_b2_pos, r, pos)
+    reward = 0  # Default reward for non-terminal states
+    return new_state, reward
+
+def get_transition_probabilities(states, actions, p, q, opponent_policy):
+    transition_probabilities = np.zeros((len(states), len(actions), len(states)))
+    rewards = np.zeros((len(states), len(actions), len(states)))
+    for s, state in enumerate(states):
+        for a, action in enumerate(actions):
+            next_state, reward = get_next_state(state, action, p, q, opponent_policy)
+            s_prime = states.index(next_state)
+            transition_probabilities[s, a, s_prime] = 1  # Simplified example
+            rewards[s, a, s_prime] = reward
+    return transition_probabilities, rewards
+
+def value_iteration(states, actions, transition_probabilities, rewards, gamma=0.9, theta=1e-6):
+    V = np.zeros(len(states))
+    policy = np.zeros(len(states), dtype=int)
+
+    while True:
+        delta = 0
+        for s in range(len(states)):
+            v = V[s]
+            action_values = []
+            for a in range(len(actions)):
+                value = sum([transition_probabilities[s, a, s_prime] * (rewards[s, a, s_prime] + gamma * V[s_prime]) for s_prime in range(len(states))])
+                action_values.append(value)
+            V[s] = max(action_values)
+            policy[s] = np.argmax(action_values)
+            delta = max(delta, abs(v - V[s]))
+        if delta < theta:
+            break
+    return policy, V
+
+def generate_graphs(states, actions, opponent_policy_type):
+    p_values = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
+    q_values = [0.6, 0.7, 0.8, 0.9, 1.0]
+
+    # Graph 1: Varying p with q = 0.7
+    q_fixed = 0.7
+    win_probabilities_p = []
+    for p in p_values:
+        transition_probabilities, rewards = get_transition_probabilities(states, actions, p, q_fixed, opponent_policy)
+        policy, V = value_iteration(states, actions, transition_probabilities, rewards)
+        win_probabilities_p.append(V[states.index((1, 1, 1, 1))])  # Assuming initial state
+
+    plt.figure()
+    plt.plot(p_values, win_probabilities_p)
+    plt.xlabel('p')
+    plt.ylabel('Probability of Winning')
+    plt.title('Probability of Winning vs p (q = 0.7)')
+    plt.show()
+
+    # Graph 2: Varying q with p = 0.3
+    p_fixed = 0.3
+    win_probabilities_q = []
+    for q in q_values:
+        transition_probabilities, rewards = get_transition_probabilities(states, actions, p_fixed, q, opponent_policy)
+        policy, V = value_iteration(states, actions, transition_probabilities, rewards)
+        win_probabilities_q.append(V[states.index((1, 1, 1, 1))])  # Assuming initial state
+
+    plt.figure()
+    plt.plot(q_values, win_probabilities_q)
+    plt.xlabel('q')
+    plt.ylabel('Probability of Winning')
+    plt.title('Probability of Winning vs q (p = 0.3)')
+    plt.show()
+
+generate_graphs(states, actions, opponent_policy_type)
